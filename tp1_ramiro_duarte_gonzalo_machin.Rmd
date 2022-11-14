@@ -1,0 +1,713 @@
+
+# Trabajo Practico N° 1 
+
+### Elaborado por Ramiro Duarte y Gonzalo Machin 
+
+### se puede acceder a este trabajo practico tambien en el siguiente [Link](https://github.com/gmachin11/tp1_ciencia_de_datos_2)
+
+# Analisis de viajes en omnibus en la ciudad de Montevideo
+
+#### Librerias
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(sf)
+library(mapview)
+library(maptools)
+library(ggrepel)
+library(patchwork)
+library(rayshader)
+library(osmdata)
+library(ggmap)
+```
+
+### Dataset de Viajes
+
+Primero descargamos datos de los viajes realizados en el sistema de transporte metropolitano (STM) en Montevideo, como el archivo es grande lo descargamos y descomprimimos directamente de la pagina del catalogo de datos abiertos
+
+```{r}
+temp <- tempfile()
+download.file("https://catalogodatos.gub.uy/dataset/b1b22d81-9333-4a1b-8254-589268a698bf/resource/aa84ab90-7934-49ae-a330-57403f7e4e2e/download/viajes_stm_072022.zip",temp)
+datos_julio <- read.csv(unz(temp, "viajes_stm_072022.csv"))
+unlink(temp)
+```
+
+### SHPs a Utilizar
+
+Cargamos Shapefiles con recorridos de los omnibus, paradas y Zonas censales para contextualizar geograficamente los datos previos dado que no se cuenta en los mismos con un x e y
+
+```{r}
+zonas_censales <- st_read("data/censo/ine_seg_11.shp")
+paradas <- st_read("data/paradas_shp/v_uptu_paradas.shp", options = "ENCODING=UTF-8")
+recorridos <- st_read("data/recorridos/v_uptu_lsv.shp")
+recorridos_no_maximales <- st_read("data/recorridos_no_maximales/uptu_variante_no_maximal.shp")
+```
+
+### Correcion de Datos
+
+Corregimos crs y cambiamos todos para trabajar unicamente en CRS = 4326
+
+```{r}
+zonas_censales <- zonas_censales %>%
+  st_set_crs(32721) %>%
+  st_transform(4326)
+
+paradas <- paradas %>%
+  st_transform(4326)
+
+recorridos <- recorridos %>%
+  st_transform(4326)
+
+recorridos_no_maximales <- recorridos_no_maximales %>%
+  st_transform(4326)
+```
+
+Filtramos los datos de las zonas censales para unicamente trabajar con los datos del departamento de Montevideo
+
+```{r}
+zonas_censales <- zonas_censales %>%
+  filter(NOMBDEPTO == "MONTEVIDEO")
+```
+
+### Visualizacion de Datos Espaciales
+
+Observamos los datos geograficos al momento
+
+```{r}
+ggplot()+
+  geom_sf(data = zonas_censales)+
+  geom_sf(data = recorridos)+
+  geom_sf(data = recorridos_no_maximales)+
+  geom_sf(data = paradas)+
+  theme_bw()
+```
+
+Observamos que el STM tiene alcance mas alla de las fronteras del departamento, pero en este trabajo unicamente utilizaremos aquellas paradas que estan dentro del departamento, para esto hacemos un spatial join para poder filtrar las paradas que no estan en el departamento y tambien asignarles el codigo de la zona censal dentro de la que pertenecen, asi podemos empezar a trabajar con los datos de transporte publico dentro de cada zona censal.
+
+#### Flitro de zonas y paradas a utilizar
+
+```{r}
+sf_use_s2(FALSE)
+
+paradas <- paradas %>%
+  st_make_valid() %>%
+  st_join(zonas_censales)
+
+paradas <- paradas %>%
+  filter(!is.na(CODSEG))
+```
+
+Observamos los datos de las secciones censales para ver en que nivel de detalle analizamos su subdivision
+
+```{r}
+head(zonas_censales)
+
+zonas_censales <- zonas_censales %>%
+  mutate(CODSEC = as.factor(CODSEC))
+```
+
+```{r}
+ggplot()+
+  geom_sf(data = zonas_censales,aes(fill=CODSEC))+
+  labs(title = "Secciones Departamentles",
+       y="Latitud",
+       x="Longitud",
+       legend="Seccion",
+       caption="Fuente: INE")+
+  theme_bw()
+```
+
+Observamos que tiene 3 niveles de subdivision, el departamento, la seccion y el segmento. como el departamento solo usaremos uno observaremos el nivel de detalle de cada seccion para observar si con este nivel es suficiente para sacar conclusiones geograficas o es necesario ir un nivel mas abajo y analiza por segmento censal
+
+### Cramos un nuevo SF de poligonos por zonas Censales para facilitar el analisis
+
+```{r}
+zonas_censales_CODSEC <- zonas_censales %>%
+  group_by(CODSEC) %>%
+  summarise()
+```
+
+### Alcance espacial
+
+```{r}
+ggplot()+
+  geom_sf(data = zonas_censales_CODSEC,aes(fill=CODSEC))+
+  geom_rect(aes(xmin = -56.235, xmax = -56.11, ymin = -34.85, ymax = -34.94), color = "red", fill = NA)+
+  labs(title = "Secciones Departamentles",
+       y="Latitud",
+       x="Longitud",
+       legend="Seccion",
+       caption="Fuente: INE")+
+  theme_bw()
+```
+
+Para facilitar el calculo y el manejo de 22 millones de datos utilizaremos group by y summarise para resumir el dataset y poder graficar los datos por zona censal
+
+```{r}
+datos_julio_resumido <- datos_julio %>%
+  group_by(codigo_parada_origen,
+           sevar_codigo,
+           dsc_linea) %>%
+  summarise(Total = sum(cantidad_pasajeros)) %>%
+  rename(COD_UBIC_P = codigo_parada_origen) %>%
+  mutate(parada_linea = paste(dsc_linea,sevar_codigo,COD_UBIC_P,sep="_")) %>%
+  select(parada_linea,
+         Total)
+
+paradas <- paradas %>%
+  mutate(parada_linea = paste(DESC_LINEA,COD_VARIAN,COD_UBIC_P,sep="_"))
+```
+
+### unimos el dataset resumido al de paradas y zonas censales para poder graficarlos
+
+```{r}
+paradas <- paradas %>%
+  left_join(datos_julio_resumido,by = "parada_linea") %>%
+  mutate_each(funs(replace(., which(is.na(.)), 0))) %>%
+  mutate(CODSEC = as.character(CODSEC))
+```
+
+### Graficamos el total de boletos vendidos por seccion
+
+```{r}
+ggplot(paradas %>%
+         st_set_geometry(NULL) %>%
+         group_by(CODSEC) %>%
+         summarise(Total = sum(Total)))+
+  geom_bar(aes(y=reorder(CODSEC,(Total)),weight = Total),fill = "#60E6C8")+
+  labs(title="Total de Viajes Vendidos por Seccion Departamental",
+       y="Seccion",
+       x="Total",
+       caption="Fuente: STM")+
+  theme_bw()
+```
+
+Observamos que las secciones 110 y 111 son las dos que mas viajes vendidos tienen, ahora observamos espacialmente
+
+```{r}
+viajes_por_seccion <- paradas %>%
+  st_set_geometry(NULL) %>%
+  group_by(CODSEC) %>%
+  summarise(Total = sum(Total))
+
+zonas_censales_CODSEC <- left_join(zonas_censales_CODSEC,viajes_por_seccion,by = "CODSEC")
+```
+
+### Mapa del Total por Seccion Censal
+
+```{r}
+ggplot()+
+  geom_sf(data = zonas_censales_CODSEC,aes(fill=Total))+
+  scale_fill_gradient(low = "#FDFF62",high = "#FF6262")+
+  labs(title = "Total de Viajes Vendidos por Zona Censal",
+       x = "Longitud",
+       y = "Latitud",
+       legend = "Viajes Vendidos",
+       caption = "Fuente: STM")+
+  theme_bw()
+```
+
+Se puede observar que la zona sureste de la ciudad es la seccion con mas viajes vendidos, superando los dos millones de viajes en el mes de Julio 2022, para concluir aun mas sobre estas zonas se puede hacer mas hincapie en relacion a la poblacion y puestos de trabajo en cada zona censal, pero sobre esto se indagara en los proximos trabajos practicos.
+
+# Trabajo Practico N° 2 
+
+### Elaborado por Ramiro Duarte y Gonzalo Machin 
+
+### se puede acceder a este trabajo practico tambien en el siguiente [Link](https://github.com/gmachin11/tp1_ciencia_de_datos_2)
+
+# Alcance geografico del Sistema de Transporte Metropolitano
+
+En la segunda entraga de este trabajo practico abordaremos que tan bueno es el alcance del transporte publico y entenderemos si todos los rincones del departamento tienen la misma accesibilidad al sistema
+
+Para esto calcularemos la distancia a la parada mas cercana de diferentes puntos de las zonas censales
+
+Primero responderemos una pregunta que quedo pendiente del TP anterior, existe una relacion entre la cantidad de viajes vendidos y la densidad de poblacion o la superficie?
+
+### Estudio de la Poblacion
+
+Para esto necesitaremos los datos del censo 2011
+
+```{r}
+Poblacion <- read.csv("data/censo/personas_por_zona.csv")
+```
+
+Con los datos de poblacion cargados, procedemos a limpiarlos un poco y hacer un join para asignarlos a cada seccion censal
+
+```{r}
+Poblacion <- Poblacion %>%
+  mutate(CODSEG = ((DPTO*100000) + (SECC*1000) + SEGM)) %>%
+  mutate(CODSEC = ((DPTO*100) + SECC))
+```
+
+```{r}
+Poblacion_por_seccion <- Poblacion %>%
+  group_by(CODSEC) %>%
+  summarise(Total = sum(Total))
+```
+
+```{r}
+zonas_censales_CODSEC <- zonas_censales_CODSEC %>%
+  mutate(CODSEC = as.numeric(CODSEC)) %>%
+  left_join(Poblacion_por_seccion,by = "CODSEC")
+```
+
+```{r}
+zonas_censales_CODSEC <- zonas_censales_CODSEC %>%
+  rename(Viajes_totales = Total.x,
+         Poblacion = Total.y) 
+```
+
+```{r}
+zonas_censales_CODSEC <- zonas_censales_CODSEC %>%
+  filter(!is.na(Poblacion))
+```
+
+### Densidad de poblacion
+
+Calculamos el area de cada zona censal y la densidad de poblacion
+
+```{r}
+zonas_censales_CODSEC <- zonas_censales_CODSEC %>%
+  mutate(Area_km2 = units::set_units(st_area(zonas_censales_CODSEC), km^2)) %>%
+  mutate(Area_km2 = sub(" [km^2].*","",Area_km2)) %>%
+  mutate(Area_km2 = as.numeric(Area_km2)) %>%
+  mutate(Densidad = Poblacion/Area_km2)
+```
+
+```{r}
+pob <- ggplot(zonas_censales_CODSEC,aes(x=Poblacion,y=Viajes_totales))+
+  geom_point()+
+  geom_smooth(method=lm, se=FALSE, col='red', size=0.5)+
+  labs(title = "Viajes Totales, Poblacion y Densidad",
+       x="Poblacion",
+       y = "Viajes Vendidos")+
+  theme_bw()
+
+density <- ggplot(zonas_censales_CODSEC,aes(x=Densidad,y=Viajes_totales))+
+  geom_point()+
+  geom_smooth(method=lm, se=FALSE, col='red', size=0.5)+
+  labs(x="Densidad de Poblacion",
+       y = "Viajes Vendidos")+
+  theme_bw()
+
+pob + density
+```
+
+Se puede observar una mayor correlacion y relacion lineal de la poblacion con la cantidad de viajes vendidos que la densidad.
+
+Ahora estudiaremos la accesibilidad del Transporte Publico en la ciudad, para esto cargaremos primero las direcciones oficiales de la ciudad
+
+## Accesibilidad
+
+### Direcciones
+
+```{r}
+direcciones <- st_read("data/direcciones/v_mdg_accesos.shp", options = "ENCODING=UTF-8")
+```
+
+Observamos el dataset cargado
+
+```{r}
+ggplot()+
+  geom_sf(data = zonas_censales_CODSEC)+
+  geom_sf(data = direcciones)+
+  theme_bw()
+```
+
+Ahora volveremos a transformar a CRS 32721 el .shp de paradas
+
+```{r}
+paradas <- paradas %>%
+  st_transform(32721)
+```
+
+Para estudiar la accesibilidad crearemos un buffer de 500 metros de cada parada para saber que tantas lineas y variantes tiene acceso una direccion particular, en este caso cabe destacar que nuestro dataset de paradas crea un punto de iguales coordenadas para cada variante de linea de omnibus que para en esa parada, por lo tanto estariamos calculando el total de variantes a las que se tiene acceso desde una direccion particular..
+
+### ST_BUFFER
+
+```{r}
+paradas_buffer <- st_buffer(paradas, 500)
+```
+
+```{r}
+ggplot()+
+  geom_sf(data = zonas_censales_CODSEC)+
+  geom_sf(data = paradas_buffer)+
+  geom_sf(data = paradas)+
+  theme_bw()
+```
+
+Con el buffer podemos saber cuantas direcciones son abastecidas y a cuantas lineas tienen acceso, dado que queremos conservar aquellas direcciones que no tienen acceso al STM a menos de 500 mts, utilizaremos st_join para unir ambos datasets
+
+Primero uniremos los buffers para mejorar la velocidad de calculo del st_join
+
+```{r}
+paradas_buffer_lineas <- paradas_buffer %>%
+  group_by(DESC_LINEA) %>%
+  summarise(Paradas = n_distinct(COD_UBIC_P.x))
+```
+
+```{r}
+ggplot()+
+  geom_sf(data = zonas_censales_CODSEC)+
+  geom_sf(data = paradas_buffer_lineas)+
+  geom_sf(data = paradas)+
+  theme_bw()
+```
+
+### Union espacial y calculo de la accesibilidad
+
+```{r}
+Accesibilidad <- st_join(direcciones,paradas_buffer_lineas)
+```
+
+Ahora calculamos el total de Lineas a las que una direccion particular puede acceder a menos de 500 mts
+
+```{r}
+Accesibilidad <- Accesibilidad %>%
+  mutate(Direccion = paste(NOM_CALLE,NUM_PUERTA,sep=" ")) %>%
+  mutate_all(~replace(., is.na(.), 0)) %>%
+  mutate(Accesos = if_else(Paradas == 0,0,1))
+```
+
+```{r}
+Direcciones_accesibles <- Accesibilidad %>%
+  st_set_geometry(NULL) %>%
+  group_by(Direccion) %>%
+  summarise(Lineas_accesibles = sum(Accesos))
+```
+
+Ahora procedemos a unir y graficar el total de paradas y lineas accesibles a menos de 500 metros desde cada direccion de la ciudad
+
+```{r}
+direcciones <- direcciones %>%
+  mutate(Direccion = paste(NOM_CALLE,NUM_PUERTA,sep=" ")) %>%
+  left_join(Direcciones_accesibles,by = "Direccion")
+```
+
+```{r}
+my_breaks = c(0,2,5,15,50,200,500)
+
+ggplot()+
+  geom_sf(data = zonas_censales_CODSEC)+
+  geom_sf(data = paradas_buffer_lineas)+
+  geom_sf(data = direcciones,aes(color = Lineas_accesibles))+
+  labs(title = "Lineas y Paradas Accesibles desde cada Direccion",
+       x = "Longitud",
+       y = "Latitud",
+       legend = "Accesibilidad")+
+  scale_color_gradient(trans = "log",breaks = my_breaks,labels = my_breaks)+
+  theme_bw()
+```
+
+Se puede apreciar que aquellas direcciones que se ubican cerca o sobre de las principales arterias de la ciudad tienen una mayor accesibilidad al STM, mientras que en gris se pueden observar aquellos lugares que estan por fuera, predominantemente ubicadas en el norte y oeste de la ciudad, esto se puede explicar probablemente por la poblacion y baja densidad de poblacion.
+
+Para observar mejor el impacto de las arterias de circulacion sobre la accesibilidad podemos hacer un hexbin map para visualizar mejor
+
+### Hexbin de accesibilidad
+
+```{r}
+montevideo_grid <- st_make_grid(zonas_censales_CODSEC,
+                             n=c(125,125),
+                             what = 'polygons',
+                             square = FALSE,
+                             flat_topped = TRUE) %>%
+  st_as_sf() %>%
+  mutate(area = st_area(.)) %>%
+  mutate(ID = row_number())
+```
+
+```{r}
+ggplot()+
+  geom_sf(data = montevideo_grid)+
+  geom_sf(data = zonas_censales_CODSEC,alpha = 0.4)+
+  theme_bw()
+```
+
+### Direcciones en cada hexbin y calculo del promedio de accesibilidad dentro de cada cuadrante
+
+```{r}
+direcciones <- direcciones %>%
+  st_transform(4326)
+```
+
+```{r}
+direcciones_hex <- st_join(direcciones,montevideo_grid)
+```
+
+```{r}
+hex_accesibilidad <- direcciones_hex %>%
+  st_set_geometry(NULL) %>%
+  group_by(ID) %>%
+  summarise(Lineas_accesibles = floor(mean(Lineas_accesibles)))
+```
+
+### Join y grafico de Hex
+
+```{r}
+montevideo_grid <- left_join(montevideo_grid,hex_accesibilidad,by = "ID")
+```
+
+```{r}
+montevideo_grid <- montevideo_grid %>%
+  filter(!is.na(Lineas_accesibles))
+```
+
+```{r}
+ggplot()+
+  geom_sf(data = zonas_censales_CODSEC,fill = NA)+
+  geom_sf(data = montevideo_grid,aes(fill=Lineas_accesibles))+
+  scale_fill_gradientn(colours = c("#7FF2A4","#CAF087","#F6F296","#F2B637","#CD4206","#5F1F03"),
+                       guide = guide_colourbar(barheight = 10))+
+  labs(title = "Accesibilidad al STM por sector de la Ciudad",
+       x = "Longitud",
+       y = "Latitud",
+       legend = "Accesibilidad")+
+  theme_bw()
+```
+
+# Trabajo Practico N° 3
+
+### Elaborado por Ramiro Duarte y Gonzalo Machin 
+
+### se puede acceder a este trabajo practico tambien en el siguiente [Link](https://github.com/gmachin11/tp1_ciencia_de_datos_2)
+
+# Representación de mapas con OpenStreetMap
+
+### Descarga de mapa base de la Ciudad de Montevideo.
+
+Descargamos el cuadro delimitador mediante la función getbb.
+
+```{r}
+bbox_montevideo <- getbb("Montevideo, Uruguay")
+```
+
+Mostramos el resultado.
+
+```{r}
+bbox_montevideo
+```
+Descargamos el mapa base mediante la función get_stamenmap.
+
+```{r}
+mapa_montevideo <- get_stamenmap(bbox=bbox_montevideo,
+              maptype="toner-lite",
+              zoom=12)
+```
+
+Mostramos el mapa con la función ggmap.
+
+```{r}
+ggmap(mapa_montevideo)
+```
+
+
+Delimitamos el polígono de la ciudad.
+
+```{r}
+poligono_montevideo <- getbb("Montevideo, Uruguay",
+                             format_out="sf_polygon")
+```
+
+Vemos el resultado.
+
+```{r}
+poligono_montevideo
+```
+
+```{r}
+ggmap(mapa_montevideo)+
+  geom_sf(data=poligono_montevideo,
+          fill=NA,
+          color="darkgreen",
+          size=1,
+          inherit.aes=FALSE)+
+  labs(title="Montevideo",
+       subtitle="Uruguay",
+       caption="Fuente: Open Street Map")+
+  theme_void()
+```
+
+### Descarga "líneas"
+
+Para mantener coherencia con el resto de los trabajos prácticos de la materia, descargamos las calles de la ciudad.
+
+En primer lugar, asignamos el boundig box.
+
+```{r}
+calles_montevideo <- opq(bbox_montevideo) %>%
+  add_osm_feature(key = "highway",
+                  value = c("motorway",
+                          "trunk",
+                          "primary",
+                          "secondary",
+                          "tertiary",
+                          "unclassified",
+                          "residential"))
+```
+
+Utilizamos la función osmdata_sf para descargar la informació y la mostramos.
+
+```{r}
+calles_montevideo <- osmdata_sf(calles_montevideo)
+```
+
+Nos quedamos con las líneas.
+
+```{r}
+calles_montevideo <- calles_montevideo$osm_lines
+```
+
+Graficamos el resultado.
+
+```{r}
+ggplot()+
+  geom_sf(data=poligono_montevideo, fill=NA, color="darkgreen", size=1)+
+    geom_sf(data=calles_montevideo)+
+  labs(title="Calles",
+       subtitle="Montevideo, Uruguay",
+       caption="Fuente: Open Street Map")+
+  theme_void()
+```
+Lo unimos con nuestro mapa base.
+
+```{r}
+ggmap(mapa_montevideo)+
+  geom_sf(data=poligono_montevideo, fill=NA, color="darkgreen", size=1, inherit.aes = FALSE)+
+    geom_sf(data=calles_montevideo, inherit.aes = FALSE)+
+  labs(title="Calles",
+       subtitle="Montevideo, Uruguay",
+       caption="Fuente: Open Street Map")+
+  theme_void()
+```
+```{r}
+dim(calles_montevideo)
+```
+```{r}
+calles_montevideo %>%
+  group_by(highway) %>%
+  summarise(cantidad=n())
+```
+Hay 14.733 observaciones, dividiendose en:
+  - 620 primarias.
+  - 11.144 residenciales.
+  - 842 secundarias.
+  - 1.458 terciarias.
+  - 447 troncales.
+  - 222 sin clasificar.
+
+Eliminamos los tramos fuera de nuestra área de influencia.
+
+```{r}
+calles_montevideo <- st_intersection(calles_montevideo, poligono_montevideo)
+```
+
+```{r}
+dim(calles_montevideo)
+```
+```{r}
+calles_montevideo %>%
+  group_by(highway) %>%
+  summarise(cantidad=n())
+```
+Hay 14.733 observaciones, dividiendose en:
+  - X primarias.
+  - X residenciales.
+  - X secundarias.
+  - X terciarias.
+  - X troncales.
+  - X sin clasificar.
+
+Eliminamos los tramos fuera de nuestra área de influencia.
+
+Graficamos.
+
+```{r}
+ggmap(mapa_montevideo)+
+  geom_sf(data=poligono_montevideo, fill=NA, color="darkgreen", size=1, inherit.aes = FALSE)+
+    geom_sf(data=calles_montevideo, inherit.aes = FALSE)+
+  labs(title="Calles",
+       subtitle="Montevideo, Uruguay",
+       caption="Fuente: Open Street Map")+
+  theme_void()
+```
+
+
+### Descarga "puntos"
+
+Descargamos las paradas de omnibus.
+
+En primer lugar, asignamos el boundig box.
+
+```{r}
+paradas_montevideo <- opq(bbox_montevideo) %>%
+  add_osm_feature(key = "highway",
+                  value = "bus_stop")
+```
+
+Utilizamos la función osmdata_sf para descargar la información
+
+```{r}
+paradas_montevideo <- osmdata_sf(paradas_montevideo)
+```
+
+```{r}
+paradas_montevideo
+```
+Nos quedamos con los valores "punto".
+
+```{r}
+paradas_montevideo <- paradas_montevideo$osm_points
+```
+
+Existen 204 observaciones.
+
+Graficamos.
+
+```{r}
+ggmap(mapa_montevideo)+
+  geom_sf(data=poligono_montevideo, fill=NA, color="darkgreen", size=1, inherit.aes = FALSE)+
+    geom_sf(data=paradas_montevideo, inherit.aes = FALSE, aes(color=highway))+
+  labs(title="Paradas",
+       subtitle="Montevideo, Uruguay",
+       color="Tipo",
+       caption="Fuente: Open Street Map")+
+  scale_color_manual(values="darkorange")+
+  theme_void()
+```
+
+Se ve que hay puntos por fuera del área de estudio. Se verá primero la dimensión y luego se los quitará con la función st_intersection.
+
+```{r}
+dim(paradas_montevideo)
+```
+
+```{r}
+paradas_montevideo %>%
+  group_by(highway) %>%
+  summarise(cantidad=n())
+```
+Vemos que hay 200 paradas y 4 N/A.
+
+```{r}
+paradas_montevideo <- st_intersection(paradas_montevideo, poligono_montevideo)
+```
+
+```{r}
+ggmap(mapa_montevideo)+
+  geom_sf(data=poligono_montevideo, fill=NA, color="darkgreen", size=1, inherit.aes = FALSE)+
+    geom_sf(data=paradas_montevideo, inherit.aes = FALSE, aes(color=highway))+
+  labs(title="Paradas",
+       subtitle="Montevideo, Uruguay",
+       color="Tipo",
+       caption="Fuente: Open Street Map")+
+  scale_color_manual(values="darkorange")+
+  theme_void()
+```
+
+```{r}
+paradas_montevideo %>%
+  group_by(highway) %>%
+  summarise(cantidad=n())
+```

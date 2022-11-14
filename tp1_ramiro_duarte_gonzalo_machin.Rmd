@@ -3,7 +3,7 @@
 
 ### Elaborado por Ramiro Duarte y Gonzalo Machin 
 
-### se puede acceder a este trabajo practico tambien en el siguiente [Link](https://github.com/gmachin11/tp1_ciencia_de_datos_2)
+### se puede acceder a este trabajo practico tambien en el siguiente [Link](https://github.com/gmachin11/tps_cdc_2)
 
 # Analisis de viajes en omnibus en la ciudad de Montevideo
 
@@ -214,7 +214,7 @@ Se puede observar que la zona sureste de la ciudad es la seccion con mas viajes 
 
 ### Elaborado por Ramiro Duarte y Gonzalo Machin 
 
-### se puede acceder a este trabajo practico tambien en el siguiente [Link](https://github.com/gmachin11/tp1_ciencia_de_datos_2)
+### se puede acceder a este trabajo practico tambien en el siguiente [Link](https://github.com/gmachin11/tps_cdc_2)
 
 # Alcance geografico del Sistema de Transporte Metropolitano
 
@@ -471,7 +471,7 @@ ggplot()+
 
 ### Elaborado por Ramiro Duarte y Gonzalo Machin 
 
-### se puede acceder a este trabajo practico tambien en el siguiente [Link](https://github.com/gmachin11/tp1_ciencia_de_datos_2)
+### se puede acceder a este trabajo practico tambien en el siguiente [Link](https://github.com/gmachin11/tps_cdc_2)
 
 # Representación de mapas con OpenStreetMap
 

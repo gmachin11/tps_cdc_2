@@ -711,3 +711,85 @@ paradas_montevideo %>%
   group_by(highway) %>%
   summarise(cantidad=n())
 ```
+
+# Trabajo Practico N° 4 
+
+### Elaborado por Ramiro Duarte y Gonzalo Machin 
+
+### se puede acceder a este trabajo practico tambien en el siguiente [Link](https://github.com/gmachin11/tps_cdc_2)
+
+# Test de Geocodificacion en Montevideo
+
+En este apartado probaremos que tan bueno es OSM para geocodificar en montevideo
+
+Primero cargamos las librerias a utilizar
+
+```{r}
+library(leaflet)
+library(tmap)
+library(tmaptools)
+```
+
+Creamos la formula para geocodificar en montevideo
+
+```{r}
+geocode_Montevideo <- function(x) {
+  geocode_Montevideo <- geocode_OSM(x, as.data.frame = TRUE)
+  geocode_Montevideo$direccion <- geocode_Montevideo$query
+  print(x)
+  
+  df <- select(geocode_Montevideo, direccion, lat, lon)
+}
+```
+
+Como base utilizaremos el dataset de direcciones ya presentado en el capitulo 2
+
+```{r}
+
+```
+
+Ahora seleccionamos un dataset de 50 direcciones de la ciudad de manera aleatoria
+
+```{r}
+Direcciones_a_geocodificar <- sample_n(direcciones,50) %>%
+  mutate(Direccion = paste(Direccion,"Montevideo, Uruguay."))
+```
+
+```{r}
+Direcciones_a_geocodificar_list <- list(Direcciones_a_geocodificar$Direccion)
+```
+
+```{r}
+ggplot()+
+  geom_sf(data = zonas_censales_CODSEC)+
+  geom_sf(data = direcciones)+
+  theme_bw()
+```
+
+Los puntos seleccionados del dataset son los siguientes
+
+```{r}
+direcciones_geocodificadas <- map(Direcciones_a_geocodificar_list, geocode_Montevideo)%>%
+  reduce(rbind)
+```
+
+```{r}
+leaflet() %>%
+  addTiles() %>%
+  addMarkers(data = Direcciones_a_geocodificar,popup = ~Direccion)
+```
+
+Resultados:
+
+```{r}
+leaflet() %>%
+  addTiles() %>%
+  addMarkers(data = Direcciones_a_geocodificar,popup = ~Direccion) %>%
+  addCircleMarkers(data = direcciones_geocodificadas)
+```
+
+Si el marcador se ubica sobre el centro del circulo significa que la direccion fue geocodificada correctamente, si el ciruclo no se encuentra presente significa que la direccion no pudo ser geocodificada, mientras que si el circulo se encuentra levemente desplazado significa que hubo una diferencia espacial en el proceso.
+
+Se puede observar que no todas las ubicaciones brindadas fueron geocodificadas correctamente, pero aun asi el resultado es positivo dado que el mas del 80% del total fue geocodificado.
+
+# Trabajo practico 5
